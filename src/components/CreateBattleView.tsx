@@ -3,6 +3,7 @@ import { Battle } from '../types';
 import { geminiService } from '../services/geminiService';
 import { sound } from '../services/sound';
 import { storage } from '../services/storage';
+import { generateLocalBattleFromNotes } from '../services/localBattleGenerator';
 import {
   Swords,
   Sparkles,
@@ -20,6 +21,8 @@ import {
   Link as LinkIcon,
   CheckCircle2,
   ExternalLink,
+  Zap,
+  RefreshCw,
 } from 'lucide-react';
 
 interface CreateBattleViewProps {
@@ -207,19 +210,53 @@ export const CreateBattleView: React.FC<CreateBattleViewProps> = ({
 
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!notes.trim() || notes.trim().length < 20) {
-      setErrorMessage('Please provide lecture notes (paste text, attach a PDF, or fetch from a URL) with at least 2-3 sentences.');
+    setErrorMessage(null);
+
+    let contentToUse = notes.trim();
+    let topicToUse = topic.trim();
+
+    // If in URL mode and user typed a URL but hasn't clicked fetch yet, auto-fetch
+    if (inputMode === 'url' && !contentToUse) {
+      if (!urlInput.trim()) {
+        setErrorMessage('Please enter a website URL or online document link.');
+        return;
+      }
+      setIsFetchingUrl(true);
+      try {
+        const fetched = await geminiService.extractUrl(urlInput.trim());
+        contentToUse = fetched.text;
+        setNotes(fetched.text);
+        if (!topicToUse && fetched.title) {
+          topicToUse = fetched.title;
+          setTopic(fetched.title);
+        }
+        setAttachedUrlInfo({ url: fetched.url, title: fetched.title });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setErrorMessage(`Failed to fetch URL: ${msg}`);
+        setIsFetchingUrl(false);
+        return;
+      }
+      setIsFetchingUrl(false);
+    }
+
+    if (inputMode === 'pdf' && (!contentToUse || !attachedPdfInfo)) {
+      setErrorMessage('Please upload a lecture PDF or document before creating the battle.');
+      return;
+    }
+
+    if (inputMode === 'paste' && contentToUse.length < 20) {
+      setErrorMessage('Please provide lecture notes with at least 2-3 sentences (minimum 20 characters).');
       return;
     }
 
     setIsLoading(true);
-    setErrorMessage(null);
     sound.playClick();
 
     try {
       const battle = await geminiService.generateBattleFromNotes(
-        notes.trim(),
-        topic.trim() || 'Custom Lecture Topic',
+        contentToUse,
+        topicToUse || (inputMode === 'pdf' ? attachedPdfInfo?.filename || 'Lecture PDF' : 'Custom Lecture Topic'),
         difficulty
       );
 
@@ -229,14 +266,36 @@ export const CreateBattleView: React.FC<CreateBattleViewProps> = ({
       onBattleCreated(battle);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(
-        msg.includes('No Gemini API key')
-          ? 'No Gemini API key detected. Please configure your key in Settings, or use our rich Offline Academy.'
-          : `AI Battle Generation failed: ${msg}. Check your API key in Settings or try again.`
-      );
+      if (msg.includes('503') || msg.includes('high demand') || msg.includes('UNAVAILABLE')) {
+        setErrorMessage(
+          'Google Gemini is temporarily experiencing high demand (503). You can retry, or immediately generate the battle using our built-in local note analysis engine.'
+        );
+      } else if (msg.includes('No Gemini API key')) {
+        setErrorMessage(
+          'No Gemini API key detected. Please configure your key in Settings, or use our rich Offline Academy.'
+        );
+      } else {
+        setErrorMessage(`AI Battle Generation failed: ${msg}. Check your API key in Settings or try again.`);
+      }
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const handleGenerateOffline = () => {
+    const contentToUse = notes.trim();
+    if (!contentToUse) {
+      setErrorMessage('Please provide lecture material (upload PDF, paste text, or URL) to generate the battle.');
+      return;
+    }
+    sound.playClick();
+    const topicToUse =
+      topic.trim() ||
+      (inputMode === 'pdf' ? attachedPdfInfo?.filename || 'Lecture PDF' : 'Custom Lecture Topic');
+    const battle = generateLocalBattleFromNotes(contentToUse, topicToUse, difficulty);
+    storage.saveCustomBattle(battle);
+    sound.playCorrect();
+    onBattleCreated(battle);
   };
 
   return (
@@ -568,37 +627,90 @@ export const CreateBattleView: React.FC<CreateBattleViewProps> = ({
           </div>
         </div>
 
-        {/* Notes Textarea (Always accessible so users can inspect/edit what was pasted or extracted) */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="block text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
-              <FileText className="w-4 h-4 text-purple-400" />
-              <span>Lecture Notes Material</span>
-            </label>
-            <div className="flex items-center gap-3 text-xs text-slate-400">
-              <span className="font-mono-code font-semibold text-purple-300">
-                {notes.split(/\s+/).filter(Boolean).length} words
-              </span>
-              <span>•</span>
-              <span className="font-mono-code">{notes.length} characters</span>
+        {/* Notes Textarea - ONLY shown in 'paste' mode */}
+        {inputMode === 'paste' ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+                <FileText className="w-4 h-4 text-purple-400" />
+                <span>Lecture Notes Material</span>
+              </label>
+              <div className="flex items-center gap-3 text-xs text-slate-400">
+                <span className="font-mono-code font-semibold text-purple-300">
+                  {notes.split(/\s+/).filter(Boolean).length} words
+                </span>
+                <span>•</span>
+                <span className="font-mono-code">{notes.length} characters</span>
+              </div>
+            </div>
+
+            <textarea
+              rows={8}
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Paste your lecture notes, textbook excerpts, or study guides here...&#10;&#10;The 3 monsters will generate questions based ONLY on this text!"
+              className="w-full p-4 rounded-2xl bg-[#141933] border border-purple-500/30 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-500/20 text-sm sm:text-base leading-relaxed font-sans resize-y"
+            />
+          </div>
+        ) : (
+          /* Autonomous AI Selection Card for PDF / URL modes */
+          <div className="p-5 rounded-2xl bg-gradient-to-r from-purple-950/40 via-[#1a1f3a] to-indigo-950/40 border border-purple-500/30 flex items-start gap-4">
+            <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300 shrink-0 mt-0.5">
+              <Sparkles className="w-5 h-5 text-yellow-300 animate-pulse" />
+            </div>
+            <div className="space-y-1 text-sm">
+              <h4 className="font-bold text-white flex items-center gap-2">
+                <span>Autonomous AI Concept &amp; Question Selection</span>
+                <span className="text-[10px] uppercase font-extrabold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  Automated
+                </span>
+              </h4>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                {inputMode === 'pdf'
+                  ? 'Gemini will directly parse the entire attached document, detect the core concepts, common misconceptions, and formulate all 3 boss battles automatically. No manual text pasting needed.'
+                  : 'Gemini will analyze the content of the attached URL, extract the fundamental principles and subtle edge cases, and construct the 3 boss challenges on its own.'}
+              </p>
             </div>
           </div>
-
-          <textarea
-            rows={8}
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Paste notes, or upload a PDF/URL above to auto-populate...&#10;&#10;The 3 monsters will generate questions based ONLY on this text!"
-            className="w-full p-4 rounded-2xl bg-[#141933] border border-purple-500/30 text-white placeholder-slate-500 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-500/20 text-sm sm:text-base leading-relaxed font-sans resize-y"
-          />
-        </div>
+        )}
 
         {/* Error message */}
         {errorMessage && (
-          <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-red-300 text-sm">
+          <div className="p-5 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-start gap-3.5 text-red-300 text-sm">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <p className="font-semibold">{errorMessage}</p>
+            <div className="space-y-3 flex-1">
+              <p className="font-semibold text-white">{errorMessage}</p>
+
+              {(errorMessage.includes('503') ||
+                errorMessage.includes('high demand') ||
+                errorMessage.includes('UNAVAILABLE') ||
+                errorMessage.includes('capacity')) && (
+                <div className="p-3.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs space-y-2">
+                  <p>
+                    <strong>Why did this happen?</strong> Google&apos;s Gemini server experienced a temporary high-demand spike (503). This is an external Google capacity surge, not an error in your notes.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleGenerate}
+                      disabled={isLoading}
+                      className="px-3.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow transition-all"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Retry with Gemini</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleGenerateOffline}
+                      className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow transition-all"
+                    >
+                      <Zap className="w-3.5 h-3.5 text-yellow-300" />
+                      <span>Generate Instantly with Local Engine</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {!hasApiKey && (
                 <p className="text-xs text-slate-300">
                   Tip: If you do not have an API key, our{' '}
@@ -620,13 +732,22 @@ export const CreateBattleView: React.FC<CreateBattleViewProps> = ({
         <div className="pt-2">
           <button
             type="submit"
-            disabled={isLoading || !notes.trim()}
+            disabled={
+              isLoading ||
+              isFetchingUrl ||
+              isExtractingPdf ||
+              (inputMode === 'paste' && !notes.trim()) ||
+              (inputMode === 'pdf' && !attachedPdfInfo) ||
+              (inputMode === 'url' && !attachedUrlInfo && !urlInput.trim())
+            }
             className="w-full py-4 px-6 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white font-extrabold text-lg shadow-xl shadow-purple-600/40 transition-all hover:scale-101 active:scale-99 cursor-pointer flex items-center justify-center gap-3 border border-purple-300/30"
           >
-            {isLoading ? (
+            {isLoading || isFetchingUrl ? (
               <>
                 <Loader2 className="w-6 h-6 animate-spin text-purple-200" />
-                <span>SUMMONING 3 BOSSES WITH GEMINI...</span>
+                <span>
+                  {isFetchingUrl ? 'FETCHING LECTURE MATERIAL...' : 'SUMMONING 3 BOSSES WITH GEMINI...'}
+                </span>
               </>
             ) : (
               <>

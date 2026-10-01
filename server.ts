@@ -5,6 +5,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { PDFParse } from 'pdf-parse';
+import { generateLocalBattleFromNotes } from './src/services/localBattleGenerator';
+import { evaluateOfflineAnswer } from './src/services/offlineEvaluator';
 
 dotenv.config();
 
@@ -33,6 +35,47 @@ function getGenAIClient(req: Request): GoogleGenAI | null {
       },
     },
   });
+}
+
+// Resilient Gemini runner with automatic retry on 503/429 and fallback cascade across flash models
+async function generateContentWithFallback(
+  ai: GoogleGenAI,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  params: any,
+  models: string[] = ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite']
+) {
+  let lastError: unknown = null;
+
+  for (const model of models) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await ai.models.generateContent({
+          ...params,
+          model,
+        });
+        return { response: res, usedModel: model };
+      } catch (err: unknown) {
+        lastError = err;
+        const msg = err instanceof Error ? err.message : String(err);
+        const isTemporary =
+          msg.includes('503') ||
+          msg.includes('high demand') ||
+          msg.includes('UNAVAILABLE') ||
+          msg.includes('RESOURCE_EXHAUSTED') ||
+          msg.includes('429');
+
+        if (isTemporary && attempt === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+
+        console.warn(`Gemini model ${model} attempt ${attempt} failed (${msg}). Trying fallback cascade...`);
+        break;
+      }
+    }
+  }
+
+  throw lastError;
 }
 
 // 1. Test API Key Endpoint
@@ -289,81 +332,90 @@ ${notes}
 Generate the 3-monster battle JSON strictly adhering to the schema.
 `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            gameTitle: { type: Type.STRING, description: 'Catchy title for the battle' },
-            monsters: {
-              type: Type.ARRAY,
-              description: 'Array of exactly 3 monsters',
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.INTEGER },
-                  name: { type: Type.STRING, description: 'Monster battle title, e.g. "Stack vs Queue"' },
-                  creature: { type: Type.STRING, description: 'Monster fantasy species, e.g. "Stack Goblin"' },
-                  emoji: { type: Type.STRING, description: 'Single emoji representing monster, e.g. "🧌"' },
-                  difficulty: { type: Type.STRING, enum: ['easy', 'medium', 'hard'] },
-                  isBoss: { type: Type.BOOLEAN },
-                  belief: { type: Type.STRING, description: 'The stubborn misconception held by the monster' },
-                  intro: { type: Type.STRING, description: 'Aggressive or humorous battle dialogue' },
-                  victoryLine: { type: Type.STRING, description: 'Monster acknowledgment of being enlightened upon defeat' },
-                  idealExplanation: { type: Type.STRING, description: 'Comprehensive ideal explanation teaching the monster' },
-                  points: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        label: { type: Type.STRING },
-                        question: { type: Type.STRING },
-                        hint: { type: Type.STRING },
-                        followUp: { type: Type.STRING, description: 'The challenging "WHY?" follow-up question' },
-                        keywords: {
-                          type: Type.ARRAY,
-                          items: { type: Type.STRING },
+    let parsed: any;
+    try {
+      const { response, usedModel } = await generateContentWithFallback(ai, {
+        contents: prompt,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              gameTitle: { type: Type.STRING, description: 'Catchy title for the battle' },
+              monsters: {
+                type: Type.ARRAY,
+                description: 'Array of exactly 3 monsters',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.INTEGER },
+                    name: { type: Type.STRING, description: 'Monster battle title, e.g. "Stack vs Queue"' },
+                    creature: { type: Type.STRING, description: 'Monster fantasy species, e.g. "Stack Goblin"' },
+                    emoji: { type: Type.STRING, description: 'Single emoji representing monster, e.g. "🧌"' },
+                    difficulty: { type: Type.STRING, enum: ['easy', 'medium', 'hard'] },
+                    isBoss: { type: Type.BOOLEAN },
+                    belief: { type: Type.STRING, description: 'The stubborn misconception held by the monster' },
+                    intro: { type: Type.STRING, description: 'Aggressive or humorous battle dialogue' },
+                    victoryLine: { type: Type.STRING, description: 'Monster acknowledgment of being enlightened upon defeat' },
+                    idealExplanation: { type: Type.STRING, description: 'Comprehensive ideal explanation teaching the monster' },
+                    points: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          label: { type: Type.STRING },
+                          question: { type: Type.STRING },
+                          hint: { type: Type.STRING },
+                          followUp: { type: Type.STRING, description: 'The challenging "WHY?" follow-up question' },
+                          keywords: {
+                            type: Type.ARRAY,
+                            items: { type: Type.STRING },
+                          },
+                          difficulty: { type: Type.INTEGER },
                         },
-                        difficulty: { type: Type.INTEGER },
+                        required: ['label', 'question', 'hint', 'followUp', 'keywords', 'difficulty'],
                       },
-                      required: ['label', 'question', 'hint', 'followUp', 'keywords', 'difficulty'],
                     },
                   },
+                  required: [
+                    'id',
+                    'name',
+                    'creature',
+                    'emoji',
+                    'difficulty',
+                    'isBoss',
+                    'belief',
+                    'intro',
+                    'victoryLine',
+                    'idealExplanation',
+                    'points',
+                  ],
                 },
-                required: [
-                  'id',
-                  'name',
-                  'creature',
-                  'emoji',
-                  'difficulty',
-                  'isBoss',
-                  'belief',
-                  'intro',
-                  'victoryLine',
-                  'idealExplanation',
-                  'points',
-                ],
               },
             },
+            required: ['gameTitle', 'monsters'],
           },
-          required: ['gameTitle', 'monsters'],
         },
-      },
-    });
+      });
 
-    const parsed = JSON.parse(response.text || '{}');
-    if (!parsed.monsters || parsed.monsters.length !== 3) {
-      throw new Error('AI must return exactly 3 monsters.');
+      parsed = JSON.parse(response.text || '{}');
+      if (!parsed.monsters || parsed.monsters.length !== 3) {
+        throw new Error('AI must return exactly 3 monsters.');
+      }
+      parsed.generatedBy = usedModel;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`Online Gemini generation temporarily unavailable (${message}). Activating intelligent local note analysis engine...`);
+      parsed = generateLocalBattleFromNotes(notes, topic, difficulty);
+      parsed.isLocalFallback = true;
+      parsed.fallbackNotice = 'Google Gemini was temporarily at capacity (503). Generated via local note analysis engine so you can play without delay!';
     }
 
     return res.json(parsed);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('Error generating battle:', message);
+    console.error('Error in generate-battle route:', message);
     return res.status(500).json({
       error: `Battle generation failed: ${message}`,
     });
@@ -388,9 +440,15 @@ app.post('/api/gemini/evaluate-answer', async (req: Request, res: Response) => {
 
     const ai = getGenAIClient(req);
     if (!ai) {
-      return res.status(400).json({
-        error: 'No Gemini API key provided. Using offline evaluation instead.',
-      });
+      // Use offline evaluator immediately if no key
+      const offlineResult = evaluateOfflineAnswer(
+        monster,
+        point,
+        studentAnswer,
+        isWhyFollowUp,
+        previousAnswer
+      );
+      return res.json(offlineResult);
     }
 
     const systemInstruction = `
@@ -425,45 +483,56 @@ SCORING SCHEMA:
 - xp: integer (10 to 50)
 `;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: `Student Answer: "${studentAnswer}"`,
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            correct: { type: Type.BOOLEAN },
-            score: { type: Type.INTEGER },
-            understanding: {
-              type: Type.STRING,
-              enum: ['weak', 'partial', 'good', 'strong'],
+    try {
+      const { response } = await generateContentWithFallback(ai, {
+        contents: `Student Answer: "${studentAnswer}"`,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              correct: { type: Type.BOOLEAN },
+              score: { type: Type.INTEGER },
+              understanding: {
+                type: Type.STRING,
+                enum: ['weak', 'partial', 'good', 'strong'],
+              },
+              feedback: { type: Type.STRING },
+              needsWhy: { type: Type.BOOLEAN },
+              followUpQuestion: { type: Type.STRING },
+              hint: { type: Type.STRING },
+              damage: { type: Type.INTEGER },
+              xp: { type: Type.INTEGER },
             },
-            feedback: { type: Type.STRING },
-            needsWhy: { type: Type.BOOLEAN },
-            followUpQuestion: { type: Type.STRING },
-            hint: { type: Type.STRING },
-            damage: { type: Type.INTEGER },
-            xp: { type: Type.INTEGER },
+            required: [
+              'correct',
+              'score',
+              'understanding',
+              'feedback',
+              'needsWhy',
+              'followUpQuestion',
+              'hint',
+              'damage',
+              'xp',
+            ],
           },
-          required: [
-            'correct',
-            'score',
-            'understanding',
-            'feedback',
-            'needsWhy',
-            'followUpQuestion',
-            'hint',
-            'damage',
-            'xp',
-          ],
         },
-      },
-    });
+      });
 
-    const parsed = JSON.parse(response.text || '{}');
-    return res.json(parsed);
+      const parsed = JSON.parse(response.text || '{}');
+      return res.json(parsed);
+    } catch (apiErr: unknown) {
+      console.warn('Gemini evaluate-answer unavailable, using offline evaluator:', apiErr);
+      const offlineResult = evaluateOfflineAnswer(
+        monster,
+        point,
+        studentAnswer,
+        isWhyFollowUp,
+        previousAnswer
+      );
+      return res.json(offlineResult);
+    }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('Error evaluating answer:', message);
@@ -471,6 +540,17 @@ SCORING SCHEMA:
       error: `Answer evaluation failed: ${message}`,
     });
   }
+});
+
+// Download Project Documentation route
+app.get('/README.md', (_req: Request, res: Response) => {
+  const filePath = path.join(__dirname, 'README.md');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="MONSTERCLASS.md"');
+    return res.sendFile(filePath);
+  }
+  return res.status(404).send('README.md not found');
 });
 
 // Serve frontend with Vite in dev or static files in production

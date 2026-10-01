@@ -16,6 +16,8 @@ import {
   Trash2,
   Sparkles,
   Loader2,
+  FileText,
+  Download,
 } from 'lucide-react';
 
 interface SettingsModalProps {
@@ -322,6 +324,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* Project Markdown Documentation */}
+          <div className="p-4 rounded-2xl bg-[#0f1221] border border-purple-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <FileText className="w-5 h-5 text-purple-400" />
+              <div>
+                <p className="text-xs font-bold text-white">Project Documentation (README.md)</p>
+                <p className="text-[11px] text-slate-400">Download the complete architectural markdown file for this app.</p>
+              </div>
+            </div>
+
+            <a
+              href="/README.md"
+              download="MONSTERCLASS.md"
+              className="px-4 py-2 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition shadow"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download .md</span>
+            </a>
           </div>
         </div>
 
