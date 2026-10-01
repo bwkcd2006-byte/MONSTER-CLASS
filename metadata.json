@@ -1,0 +1,6 @@
+{
+  "name": "MonsterClass - Don't Just Answer. Teach the Monster.",
+  "description": "AI-powered gamified learning platform that converts lecture notes into playable 3-boss battles. Challenge monster misconceptions, explain why, and master engineering concepts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
